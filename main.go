@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 
 	httpd "github.com/jability/tide/http"
 	"github.com/jability/tide/store"
@@ -21,22 +22,18 @@ const (
 )
 
 // Command line parameters
-var inmem bool
-var httpAddr string
-var raftAddr string
-var joinAddr string
-var nodeID string
+var (
+	httpAddr string
+	raftAddr string
+	joinAddr string
+	nodeID   string
+)
 
 func init() {
-	flag.BoolVar(&inmem, "inmem", false, "Use in-memory storage for Raft")
 	flag.StringVar(&httpAddr, "haddr", DefaultHTTPAddr, "Set the HTTP bind address")
 	flag.StringVar(&raftAddr, "raddr", DefaultRaftAddr, "Set Raft bind address")
 	flag.StringVar(&joinAddr, "join", "", "Set join address, if any")
 	flag.StringVar(&nodeID, "id", "", "Node ID. If not set, same as Raft bind address")
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [options] <raft-data-path> \n", os.Args[0])
-		flag.PrintDefaults()
-	}
 }
 
 func main() {
@@ -51,15 +48,12 @@ func main() {
 	}
 
 	// Ensure Raft storage exists.
-	raftDir := flag.Arg(0)
-	if raftDir == "" {
-		log.Fatalln("No Raft storage directory specified")
-	}
-	if err := os.MkdirAll(raftDir, 0700); err != nil {
+	raftDir, err := createCacheDir(nodeID)
+	if err != nil {
 		log.Fatalf("failed to create path for Raft storage: %s", err.Error())
 	}
 
-	s := store.New(inmem)
+	s := store.New(false)
 	s.RaftDir = raftDir
 	s.RaftBind = raftAddr
 	if err := s.Open(joinAddr == "", nodeID); err != nil {
@@ -98,4 +92,18 @@ func join(joinAddr, raftAddr, nodeID string) error {
 	}
 	defer resp.Body.Close()
 	return nil
+}
+
+func createCacheDir(nodeID string) (string, error) {
+	cacheRootDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("user root cache dir: %w", err)
+	}
+
+	cacheDir := filepath.Join(cacheRootDir, nodeID)
+	if err := os.MkdirAll(cacheDir, 0700); err != nil {
+		return "", fmt.Errorf("create cache dir: %w", err)
+	}
+
+	return cacheDir, nil
 }
