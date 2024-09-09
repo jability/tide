@@ -53,7 +53,7 @@ func main() {
 		log.Fatalf("failed to create path for Raft storage: %s", err.Error())
 	}
 
-	s := store.New(false)
+	s := store.New()
 	s.RaftDir = raftDir
 	s.RaftBind = raftAddr
 	if err := s.Open(joinAddr == "", nodeID); err != nil {

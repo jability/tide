@@ -8,19 +8,20 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
-// Store is the interface Raft-backed key-value stores must implement.
-type Store interface {
-	// Get returns the value for the given key.
-	Get(key string) (string, error)
+// IDGenerator is the interface Raft-backed key-value stores must implement.
+type IDGenerator interface {
+	// GetAll returns all allocated ids
+	GetAll() []int
 
-	// Set sets the value for the given key, via distributed consensus.
-	Set(key, value string) error
+	// Acquire returns a new identifier, via distributed consensus.
+	Acquire() (int, error)
 
 	// Delete removes the given key, via distributed consensus.
-	Delete(key string) error
+	Release(id int) error
 
 	// Join joins the node, identitifed by nodeID and reachable at addr, to the cluster.
 	Join(nodeID string, addr string) error
@@ -31,14 +32,14 @@ type Service struct {
 	addr string
 	ln   net.Listener
 
-	store Store
+	gen IDGenerator
 }
 
 // New returns an uninitialized HTTP service.
-func New(addr string, store Store) *Service {
+func New(addr string, gen IDGenerator) *Service {
 	return &Service{
-		addr:  addr,
-		store: store,
+		addr: addr,
+		gen:  gen,
 	}
 }
 
@@ -69,7 +70,6 @@ func (s *Service) Start() error {
 // Close closes the service.
 func (s *Service) Close() {
 	s.ln.Close()
-	return
 }
 
 // ServeHTTP allows Service to serve HTTP requests.
@@ -107,34 +107,29 @@ func (s *Service) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.Join(nodeID, remoteAddr); err != nil {
+	if err := s.gen.Join(nodeID, remoteAddr); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 }
 
 func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
-	getKey := func() string {
+	getKey := func() int {
 		parts := strings.Split(r.URL.Path, "/")
 		if len(parts) != 3 {
-			return ""
+			return 0
 		}
-		return parts[2]
+		atoi, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return 0
+		}
+		return atoi
 	}
 
 	switch r.Method {
 	case "GET":
-		k := getKey()
-		if k == "" {
-			w.WriteHeader(http.StatusBadRequest)
-		}
-		v, err := s.store.Get(k)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		b, err := json.Marshal(map[string]string{k: v})
+		vals := s.gen.GetAll()
+		b, err := json.Marshal(map[string][]int{"ids": vals})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -142,26 +137,26 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, string(b))
 
 	case "POST":
-		// Read the value from the POST body.
-		m := map[string]string{}
-		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
+		v, err := s.gen.Acquire()
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		for k, v := range m {
-			if err := s.store.Set(k, v); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
+
+		b, err := json.Marshal(map[string]int{"id": v})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
+		io.WriteString(w, string(b))
 
 	case "DELETE":
 		k := getKey()
-		if k == "" {
+		if k == 0 {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if err := s.store.Delete(k); err != nil {
+		if err := s.gen.Release(k); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}

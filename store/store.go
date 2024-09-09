@@ -12,9 +12,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -29,18 +32,16 @@ const (
 
 type command struct {
 	Op    string `json:"op,omitempty"`
-	Key   string `json:"key,omitempty"`
-	Value string `json:"value,omitempty"`
+	Value int    `json:"value,omitempty"`
 }
 
-// Store is a simple key-value store, where all changes are made via Raft consensus.
-type Store struct {
+// IDGenerator is a simple key-value store, where all changes are made via Raft consensus.
+type IDGenerator struct {
 	RaftDir  string
 	RaftBind string
-	inmem    bool
 
 	mu sync.Mutex
-	m  map[string]string // The key-value store for the system.
+	m  map[int]bool // The key-value store for the system.
 
 	raft *raft.Raft // The consensus mechanism
 
@@ -48,10 +49,9 @@ type Store struct {
 }
 
 // New returns a new Store.
-func New(inmem bool) *Store {
-	return &Store{
-		m:      make(map[string]string),
-		inmem:  inmem,
+func New() *IDGenerator {
+	return &IDGenerator{
+		m:      make(map[int]bool),
 		logger: log.New(os.Stderr, "[store] ", log.LstdFlags),
 	}
 }
@@ -59,7 +59,7 @@ func New(inmem bool) *Store {
 // Open opens the store. If enableSingle is set, and there are no existing peers,
 // then this node becomes the first node, and therefore leader, of the cluster.
 // localID should be the server identifier for this node.
-func (s *Store) Open(enableSingle bool, localID string) error {
+func (s *IDGenerator) Open(enableSingle bool, localID string) error {
 	// Setup Raft configuration.
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(localID)
@@ -83,19 +83,14 @@ func (s *Store) Open(enableSingle bool, localID string) error {
 	// Create the log store and stable store.
 	var logStore raft.LogStore
 	var stableStore raft.StableStore
-	if s.inmem {
-		logStore = raft.NewInmemStore()
-		stableStore = raft.NewInmemStore()
-	} else {
-		boltDB, err := raftboltdb.New(raftboltdb.Options{
-			Path: filepath.Join(s.RaftDir, "raft.db"),
-		})
-		if err != nil {
-			return fmt.Errorf("new bbolt store: %s", err)
-		}
-		logStore = boltDB
-		stableStore = boltDB
+	boltDB, err := raftboltdb.New(raftboltdb.Options{
+		Path: filepath.Join(s.RaftDir, "raft.db"),
+	})
+	if err != nil {
+		return fmt.Errorf("new bbolt store: %s", err)
 	}
+	logStore = boltDB
+	stableStore = boltDB
 
 	// Instantiate the Raft systems.
 	ra, err := raft.NewRaft(config, (*fsm)(s), logStore, stableStore, snapshots, transport)
@@ -119,42 +114,52 @@ func (s *Store) Open(enableSingle bool, localID string) error {
 	return nil
 }
 
-// Get returns the value for the given key.
-func (s *Store) Get(key string) (string, error) {
+func (s *IDGenerator) GetAll() []int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.m[key], nil
+
+	return slices.Collect(maps.Keys(s.m))
 }
 
-// Set sets the value for the given key.
-func (s *Store) Set(key, value string) error {
+// Acquire returns a new identifier
+func (s *IDGenerator) Acquire() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.raft.State() != raft.Leader {
-		return fmt.Errorf("not leader")
+		return 0, fmt.Errorf("not leader")
+	}
+
+	var freeID int
+	for id := range math.MaxInt32 {
+		if _, ok := s.m[id]; !ok {
+			freeID = id
+			break
+		}
 	}
 
 	c := &command{
-		Op:    "set",
-		Key:   key,
-		Value: value,
+		Op:    "acquire",
+		Value: freeID,
 	}
 	b, err := json.Marshal(c)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	f := s.raft.Apply(b, raftTimeout)
-	return f.Error()
+	return 0, f.Error()
 }
 
 // Delete deletes the given key.
-func (s *Store) Delete(key string) error {
+func (s *IDGenerator) Release(id int) error {
 	if s.raft.State() != raft.Leader {
 		return fmt.Errorf("not leader")
 	}
 
 	c := &command{
-		Op:  "delete",
-		Key: key,
+		Op:    "release",
+		Value: id,
 	}
 	b, err := json.Marshal(c)
 	if err != nil {
@@ -167,7 +172,7 @@ func (s *Store) Delete(key string) error {
 
 // Join joins a node, identified by nodeID and located at addr, to this store.
 // The node must be ready to respond to Raft communications at that address.
-func (s *Store) Join(nodeID, addr string) error {
+func (s *IDGenerator) Join(nodeID, addr string) error {
 	s.logger.Printf("received join request for remote node %s at %s", nodeID, addr)
 
 	configFuture := s.raft.GetConfiguration()
@@ -202,7 +207,7 @@ func (s *Store) Join(nodeID, addr string) error {
 	return nil
 }
 
-type fsm Store
+type fsm IDGenerator
 
 // Apply applies a Raft log entry to the key-value store.
 func (f *fsm) Apply(l *raft.Log) interface{} {
@@ -212,10 +217,10 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 	}
 
 	switch c.Op {
-	case "set":
-		return f.applySet(c.Key, c.Value)
-	case "delete":
-		return f.applyDelete(c.Key)
+	case "acquire":
+		return f.applyAcquire(c.Value)
+	case "release":
+		return f.applyRelease(c.Value)
 	default:
 		panic(fmt.Sprintf("unrecognized command op: %s", c.Op))
 	}
@@ -227,16 +232,14 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	defer f.mu.Unlock()
 
 	// Clone the map.
-	o := make(map[string]string)
-	for k, v := range f.m {
-		o[k] = v
-	}
+	o := make(map[int]bool)
+	maps.Copy(o, f.m)
 	return &fsmSnapshot{store: o}, nil
 }
 
 // Restore stores the key-value store to a previous state.
 func (f *fsm) Restore(rc io.ReadCloser) error {
-	o := make(map[string]string)
+	o := make(map[int]bool)
 	if err := json.NewDecoder(rc).Decode(&o); err != nil {
 		return err
 	}
@@ -247,22 +250,22 @@ func (f *fsm) Restore(rc io.ReadCloser) error {
 	return nil
 }
 
-func (f *fsm) applySet(key, value string) interface{} {
+func (f *fsm) applyAcquire(id int) interface{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.m[key] = value
+	f.m[id] = true
 	return nil
 }
 
-func (f *fsm) applyDelete(key string) interface{} {
+func (f *fsm) applyRelease(id int) interface{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.m, key)
+	delete(f.m, id)
 	return nil
 }
 
 type fsmSnapshot struct {
-	store map[string]string
+	store map[int]bool
 }
 
 func (f *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
@@ -281,7 +284,6 @@ func (f *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
 		// Close the sink.
 		return sink.Close()
 	}()
-
 	if err != nil {
 		sink.Cancel()
 	}
