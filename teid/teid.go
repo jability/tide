@@ -5,7 +5,7 @@
 //
 // Distributed consensus is provided via the Raft algorithm, specifically the
 // Hashicorp implementation.
-package store
+package teid
 
 import (
 	"encoding/json"
@@ -123,13 +123,11 @@ func (s *IDGenerator) GetAll() []int {
 
 // Acquire returns a new identifier
 func (s *IDGenerator) Acquire() (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.raft.State() != raft.Leader {
 		return 0, fmt.Errorf("not leader")
 	}
 
+	s.mu.Lock()
 	var freeID int
 	for id := range math.MaxInt32 {
 		if _, ok := s.m[id]; !ok {
@@ -137,6 +135,7 @@ func (s *IDGenerator) Acquire() (int, error) {
 			break
 		}
 	}
+	s.mu.Unlock()
 
 	c := &command{
 		Op:    "acquire",
@@ -148,7 +147,7 @@ func (s *IDGenerator) Acquire() (int, error) {
 	}
 
 	f := s.raft.Apply(b, raftTimeout)
-	return 0, f.Error()
+	return freeID, f.Error()
 }
 
 // Delete deletes the given key.
@@ -253,6 +252,7 @@ func (f *fsm) Restore(rc io.ReadCloser) error {
 func (f *fsm) applyAcquire(id int) interface{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.logger.Printf("commited id: %d\n", id)
 	f.m[id] = true
 	return nil
 }
@@ -260,6 +260,7 @@ func (f *fsm) applyAcquire(id int) interface{} {
 func (f *fsm) applyRelease(id int) interface{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.logger.Printf("deleted id: %d\n", id)
 	delete(f.m, id)
 	return nil
 }

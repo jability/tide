@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 
 	httpd "github.com/jability/tide/http"
-	"github.com/jability/tide/store"
+	"github.com/jability/tide/teid"
 )
 
 // Command line defaults
@@ -49,7 +49,7 @@ func main() {
 		log.Fatalf("failed to create path for Raft storage: %s", err.Error())
 	}
 
-	s := store.New()
+	s := teid.New()
 	s.RaftDir = raftDir
 	s.RaftBind = raftAddr
 	if err := s.Open(joinAddr == "", nodeID); err != nil {
