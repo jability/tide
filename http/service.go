@@ -74,8 +74,8 @@ func (s *Service) Close() {
 
 // ServeHTTP allows Service to serve HTTP requests.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/key") {
-		s.handleKeyRequest(w, r)
+	if strings.HasPrefix(r.URL.Path, "/teid") {
+		s.handleTEIDRequest(w, r)
 	} else if r.URL.Path == "/join" {
 		s.handleJoin(w, r)
 	} else {
@@ -113,7 +113,7 @@ func (s *Service) handleJoin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleTEIDRequest(w http.ResponseWriter, r *http.Request) {
 	getKey := func() int {
 		parts := strings.Split(r.URL.Path, "/")
 		if len(parts) != 3 {
