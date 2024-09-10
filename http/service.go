@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -129,6 +130,7 @@ func (s *Service) handleTEIDRequest(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		vals := s.gen.GetAll()
+		slices.Sort(vals)
 		b, err := json.Marshal(map[string][]int{"ids": vals})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
